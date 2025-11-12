@@ -29,5 +29,16 @@ async function request(path: string, options: RequestInit = {}): Promise<ApiResp
 export async function apiPost(path: string, body: any) {
   return request(path, { method: 'POST', body: JSON.stringify(body) });
 }
-export async function apiGet(path: string) { return request(path, { method: 'GET' }); }
-export default { apiGet, apiPost };
+
+export async function apiGet(path: string) { 
+  return request(path, { method: 'GET' }); 
+}
+export async function apiPut(path: string, body: any) {
+  return request(path, { method: "PUT", body: JSON.stringify(body) });
+}
+
+export async function apiDelete(path: string) {
+  return request(path, { method: "DELETE" });
+}
+
+export default { apiGet, apiPost, apiPut, apiDelete };

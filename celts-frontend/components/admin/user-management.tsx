@@ -20,6 +20,7 @@ interface User {
   id: string
   name: string
   email: string
+  systemId: string
   role: "admin" | "faculty" | "student"
   status: "active" | "inactive"
   joinDate: string
@@ -43,6 +44,7 @@ export function UserManagement() {
   const [isAddOpen, setIsAddOpen] = useState(false)
   const [newName, setNewName] = useState("")
   const [newEmail, setNewEmail] = useState("")
+  const [newSystemId, setNewSystemId] = useState("")
   const [newRole, setNewRole] = useState<"admin" | "faculty" | "student">("student")
   const [newIdValue, setNewIdValue] = useState("") // employeeId or rollNo
   const [newCanEditScores, setNewCanEditScores] = useState(false)
@@ -64,6 +66,7 @@ export function UserManagement() {
             id: u._id || u.id || String(Math.random()),
             name: u.name || "",
             email: u.email || "",
+            systemId: u.systemId || "",
             role: (u.role || "student") as "admin" | "faculty" | "student",
             status: normalizeStatus(u.isActive === false ? "inactive" : (u.status ?? "active")),
             joinDate: u.createdAt ? new Date(u.createdAt).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10),
@@ -96,23 +99,76 @@ export function UserManagement() {
     setIsDialogOpen(true)
   }
 
-  const handleSaveEdit = () => {
-    if (editingUser) {
-      setUsers(users.map((u) => (u.id === editingUser.id ? { ...u, ...editFormData } as User : u)))
-      setIsDialogOpen(false)
-      setEditingUser(null)
+  const handleSaveEdit = async () => {
+    if (!editingUser) return;
+    const id = editingUser.id;
+    const payload: any = {
+      name: editFormData.name,
+      email: editFormData.email,
+      systemId: editFormData.systemId,
+      role: editFormData.role,
+    };
+
+    try {
+      // optimistic UI disabled until server confirms
+      const res = await api.apiPut(`/admin/users/${id}`, payload);
+      if (!res.ok) {
+        console.error('Failed update user', res);
+        // show simple alert/message - you can improve UI later
+        alert(res.error?.message || 'Failed to update user');
+        return;
+      }
+      const updated = res.data?.user || res.data;
+      setUsers(users.map(u => u.id === id ? {
+        id: updated._id || updated.id || id,
+        name: updated.name,
+        email: updated.email,
+        systemId: updated.systemId,
+        role: updated.role,
+        status: normalizeStatus(updated.isActive === false ? 'inactive' : (updated.status ?? 'active')),
+        joinDate: updated.createdAt ? new Date(updated.createdAt).toISOString().slice(0, 10) : u.joinDate
+      } : u));
+      setIsDialogOpen(false);
+      setEditingUser(null);
+    } catch (err) {
+      console.error('Error saving edit', err);
+      alert('Network error while updating user');
     }
-  }
+  };
 
-  const handleToggleStatus = (userId: string) => {
-    setUsers(users.map((u) => (u.id === userId ? { ...u, status: u.status === "active" ? "inactive" : "active" } : u)))
-    // OPTIONAL: make API call to toggle status on backend if you add that endpoint
-  }
+  const handleDeleteUser = async (userId: string) => {
+  const ok = confirm('Are you sure you want to delete this user? This action cannot be undone.');
+  if (!ok) return;
 
-  const handleDeleteUser = (userId: string) => {
-    setUsers(users.filter((u) => u.id !== userId))
-    // OPTIONAL: call backend delete if endpoint exists
+  try {
+    const res = await api.apiDelete(`/admin/users/${userId}`);
+
+    console.log('[Delete] api response object:', res);
+    
+
+    if (!res.ok) {
+      const serverMessage =
+        res.error?.message ||
+        (typeof res.error === 'string' ? res.error : null) ||
+        (res.data && res.data.message) ||
+        `Server returned ${res.status || 'an unknown status'}`;
+      console.error('Delete failed ->', { status: res.status, serverMessage, raw: res });
+      alert(`Failed to delete user: ${serverMessage}`);
+      return;
+    }
+    console.log("[Delete] response full:", JSON.stringify(res, null, 2));
+    setUsers(prev => prev.filter(u => u.id !== userId));
+    alert('User deleted successfully.');
+  } 
+  catch (err) {
+    console.error('Network or unexpected error while deleting user', err);
+    alert('Network error while deleting user. See console for details.');
   }
+  
+};
+
+
+
 
   // ---------- Add single user (calls backend /admin/users) ----------
   const openAddDialog = () => {
@@ -136,6 +192,7 @@ export function UserManagement() {
       const payload: any = {
         name: newName,
         email: newEmail,
+        systemId: newSystemId,
         password: newIdValue, // admin sets password as rollNo or employeeId
         role: newRole,
       }
@@ -154,6 +211,7 @@ export function UserManagement() {
           id: created._id || String(Math.random()),
           name: created.name || newName,
           email: created.email || newEmail,
+          systemId: created.systemId || newSystemId,
           role: (created.role || newRole) as "admin" | "faculty" | "student",
           status: normalizeStatus(created.status ?? (created.isActive === false ? "inactive" : "active")),
           joinDate: created.createdAt ? new Date(created.createdAt).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10),
@@ -164,6 +222,7 @@ export function UserManagement() {
           id: String(Math.random()),
           name: newName,
           email: newEmail,
+          systemId: newSystemId,
           role: newRole,
           status: "active",
           joinDate: new Date().toISOString().slice(0, 10),
@@ -223,6 +282,7 @@ export function UserManagement() {
         id: String(Math.random()),
         name: p.name || "",
         email: p.email || "",
+        systemId: p.systemId || "",
         role: (p.role || "student") as "admin" | "faculty" | "student",
         status: normalizeStatus(p.status ?? "active"),
         joinDate: new Date().toISOString().slice(0, 10),
@@ -282,6 +342,11 @@ export function UserManagement() {
               </div>
 
               <div>
+                <label className="text-sm block mb-1">Enter Id</label>
+                <Input placeholder="Id" value={newSystemId} onChange={(e) => setNewSystemId(e.target.value)} />
+              </div>
+
+              <div>
                 <label className="text-sm block mb-1">Select Role</label>
                 <select value={newRole} onChange={(e) => setNewRole(e.target.value as any)} className="w-full px-3 py-2 border border-border rounded bg-background">
                   <option value="admin">Admin</option>
@@ -291,7 +356,7 @@ export function UserManagement() {
               </div>
 
               <div>
-                <label className="text-sm block mb-1">{newRole === "faculty" ? "Employee ID (will be password)" : "College Roll No (will be password)"}</label>
+                <label className="text-sm block mb-1">{newRole === "faculty" ? "Password" : "Student Roll Number Can be Password"}</label>
                 <Input value={newIdValue} onChange={(e) => setNewIdValue(e.target.value)} />
               </div>
 
@@ -328,6 +393,7 @@ export function UserManagement() {
               <tr className="border-b border-border">
                 <th className="px-6 py-3 text-left text-sm font-semibold">Name</th>
                 <th className="px-6 py-3 text-left text-sm font-semibold">Email</th>
+                <th className="px-6 py-3 text-left text-sm font-semibold">System ID</th>
                 <th className="px-6 py-3 text-left text-sm font-semibold">Role</th>
                 <th className="px-6 py-3 text-left text-sm font-semibold">Status</th>
                 <th className="px-6 py-3 text-left text-sm font-semibold">Join Date</th>
@@ -343,6 +409,7 @@ export function UserManagement() {
                 <tr key={user.id} className="border-b border-border hover:bg-muted/30">
                   <td className="px-6 py-4 text-sm">{user.name}</td>
                   <td className="px-6 py-4 text-sm text-muted-foreground">{user.email}</td>
+                  <td className="px-6 py-4 text-sm">{user.systemId}</td>
                   <td className="px-6 py-4 text-sm">
                     <span className="px-2 py-1 rounded bg-secondary text-secondary-foreground text-xs font-medium capitalize">
                       {user.role}
@@ -350,11 +417,10 @@ export function UserManagement() {
                   </td>
                   <td className="px-6 py-4 text-sm">
                     <span
-                      className={`px-2 py-1 rounded text-xs font-medium ${
-                        user.status === "active"
+                      className={`px-2 py-1 rounded text-xs font-medium ${user.status === "active"
                           ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
                           : "bg-gray-100 text-gray-700 dark:bg-gray-900/30 dark:text-gray-400"
-                      }`}
+                        }`}
                     >
                       {user.status}
                     </span>
@@ -364,9 +430,6 @@ export function UserManagement() {
                     <div className="flex items-center gap-2">
                       <Button variant="ghost" size="sm" onClick={() => handleEdit(user)}>
                         <Edit2 className="w-4 h-4" />
-                      </Button>
-                      <Button variant="ghost" size="sm" onClick={() => handleToggleStatus(user.id)}>
-                        {user.status === "active" ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
                       </Button>
                       <Button variant="ghost" size="sm" onClick={() => handleDeleteUser(user.id)}>
                         <Trash2 className="w-4 h-4" />
@@ -404,6 +467,13 @@ export function UserManagement() {
                   type="email"
                   value={editFormData.email || ""}
                   onChange={(e) => setEditFormData({ ...editFormData, email: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium mb-1 block">System Id</label>
+                <Input
+                  value={editFormData.systemId || ""}
+                  onChange={(e) => setEditFormData({ ...editFormData, systemId: e.target.value })}
                 />
               </div>
               <div>

@@ -63,15 +63,16 @@ router.get('/admin/users', protect, restrictTo(['admin']), async (req, res) => {
 
 // ---------- ADMIN: Create / Onboard user (enhanced with optional immediate assignment) ----------
 router.post('/admin/users', protect, restrictTo(['admin']), async (req, res) => {
-  const { name, email, password, role, canEditScores = false, assignedFaculty, cohort } = req.body;
+  const { name, email, systemId,  password, role, canEditScores = false, assignedFaculty, cohort } = req.body;
   try {
-    if (!name || !email || !password) return res.status(400).json({ message: 'name, email and password are required' });
+    if (!name || !email || !systemId || !password) return res.status(400).json({ message: 'name, email, id and password are required' });
 
     if (await User.findOne({ email })) return res.status(400).json({ message: 'User already exists' });
 
     const user = await User.create({
       name,
       email,
+      systemId,
       password,
       role,
       facultyPermissions: { canEditScores },
@@ -98,6 +99,121 @@ router.post('/admin/users', protect, restrictTo(['admin']), async (req, res) => 
     return res.status(500).json({ message: 'Error creating user', details: error.message });
   }
 });
+
+
+// ---------- ADMIN: Update user ----------
+router.put('/admin/users/:id', protect, restrictTo(['admin']), async (req, res) => {
+  const id = req.params.id;
+  try {
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid user id' });
+
+    const allowed = ['name', 'email', 'systemId', 'role', 'cohort', 'assignedFaculty', 'facultyPermissions'];
+    const updates = {};
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) updates[key] = req.body[key];
+    }
+
+    // If facultyPermissions passed as an object, only accept canEditScores boolean
+    if (updates.facultyPermissions && typeof updates.facultyPermissions === 'object') {
+      updates.facultyPermissions = { canEditScores: Boolean(updates.facultyPermissions.canEditScores) };
+    }
+
+    // If changing assignedFaculty ensure valid faculty id or null
+    if (updates.assignedFaculty) {
+      if (!mongoose.Types.ObjectId.isValid(updates.assignedFaculty)) {
+        return res.status(400).json({ message: 'Invalid assignedFaculty id' });
+      }
+      const fac = await User.findById(updates.assignedFaculty);
+      if (!fac || fac.role !== 'faculty') return res.status(400).json({ message: 'Assigned user is not a faculty' });
+    }
+
+    const user = await User.findById(id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    // Keep track of old assignedFaculty to update reverse refs if needed
+    const oldAssigned = user.assignedFaculty ? user.assignedFaculty.toString() : null;
+
+    // apply updates
+    Object.assign(user, updates);
+    await user.save();
+
+    // If assignedFaculty changed and user is a student -> ensure bidirectional ref
+    if (user.role === 'student') {
+      const newAssigned = user.assignedFaculty ? user.assignedFaculty.toString() : null;
+      if (oldAssigned !== newAssigned) {
+        // remove from old faculty.students
+        if (oldAssigned && mongoose.Types.ObjectId.isValid(oldAssigned)) {
+          const oldFac = await User.findById(oldAssigned);
+          if (oldFac && Array.isArray(oldFac.students)) {
+            oldFac.students = oldFac.students.filter(sid => sid.toString() !== user._id.toString());
+            await oldFac.save();
+          }
+        }
+        // add to new faculty.students
+        if (newAssigned && mongoose.Types.ObjectId.isValid(newAssigned)) {
+          const newFac = await User.findById(newAssigned);
+          if (newFac && newFac.role === 'faculty') {
+            newFac.students = newFac.students || [];
+            if (!newFac.students.find(sid => sid.toString() === user._id.toString())) {
+              newFac.students.push(user._id);
+              await newFac.save();
+            }
+          }
+        }
+      }
+    }
+
+    const out = user.toObject();
+    delete out.password;
+    res.json({ message: 'User updated', user: out });
+  } catch (error) {
+    console.error('Update user error:', error);
+    res.status(500).json({ message: 'Error updating user', details: error.message });
+  }
+});
+
+
+// ---------- ADMIN: Delete User ----------
+router.delete('/admin/users/:id', protect, restrictTo(['admin']), async (req, res) => {
+  const id = req.params.id;
+
+  try {
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid user id' });
+    }
+
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Clean up relationships if needed
+    if (user.role === 'student' && user.assignedFaculty) {
+      await User.updateOne(
+        { _id: user.assignedFaculty },
+        { $pull: { students: user._id } }
+      );
+    }
+
+    if (user.role === 'faculty' && Array.isArray(user.students) && user.students.length > 0) {
+      await User.updateMany(
+        { _id: { $in: user.students } },
+        { $unset: { assignedFaculty: "" } }
+      );
+    }
+
+    // ✅ Use modern delete method
+    await User.findByIdAndDelete(id);
+
+    res.json({ message: 'User deleted successfully' });
+  } catch (error) {
+    console.error('Delete user error:', error);
+    res.status(500).json({ message: 'Error deleting user', details: error.message });
+  }
+});
+
+
+
 
 // ---------- ADMIN: Update faculty permissions ----------
 router.patch('/admin/faculty/:id/permissions', protect, restrictTo(['admin']), async (req, res) => {
