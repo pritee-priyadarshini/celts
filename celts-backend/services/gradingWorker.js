@@ -12,6 +12,49 @@ const TestSet = require("../models/TestSet");
 const Batch = require("../models/Batch");
 const StudentStats = require("../models/StudentStats");
 
+function applyStrictSpeakingPenalties(evaluation, totalQuestions) {
+  let band = typeof evaluation.band_score === "number" ? evaluation.band_score : 0;
+
+  // If many questions have coverage "minimal" or "none", clamp hard
+  const perQ = Array.isArray(evaluation.per_question) ? evaluation.per_question : [];
+  const minimalOrNoneCount = perQ.filter(q =>
+    q.coverage === "minimal" || q.coverage === "none"
+  ).length;
+
+  if (totalQuestions > 0) {
+    const ratio = minimalOrNoneCount / totalQuestions;
+
+    // If 100% of questions are minimal/none -> cap band to <= 2
+    if (ratio === 1) {
+      band = Math.min(band, 2);
+    }
+    // If more than half not answered properly -> cap band to <= 3
+    else if (ratio >= 0.5) {
+      band = Math.min(band, 3);
+    }
+  }
+
+  // If transcription is extremely short (e.g. < 15–20 words), cap band as well
+  const wordCount = (evaluation.transcription || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean).length;
+
+  if (wordCount < 10) {
+    band = Math.min(band, 2);
+  } else if (wordCount < 20) {
+    band = Math.min(band, 3);
+  }
+
+  // Round to nearest 0.5 just like before
+  band = Math.round(band * 2) / 2;
+
+  evaluation.band_score = band;
+  evaluation.overall_band_score = band;
+  return evaluation;
+}
+
+
 // StudentStats helper 
 async function updateStudentStatsForSkill({
   student,
@@ -243,8 +286,8 @@ STRICTNESS RULES (MUST FOLLOW):
 - Coherence and Cohesion must reflect paragraphing, logical progression, and use of cohesive devices.
   Overuse or mechanical use of linking words must be penalised.
 
-Return ONLY valid JSON (no markdown, no explanation, no extra text).
-The JSON must have the shape:
+Return ONLY valid json (no markdown, no explanation, no extra text).
+The response MUST be a single json object with the exact shape:
 
 {
   "band_score": number,
@@ -314,7 +357,7 @@ async function gradeSpeaking({
     );
   }
 
-  // 1) TRANSCRIPTION
+  // TRANSCRIPTION
   let transcription = manualTranscription || "";
 
   if (!transcription && mediaPath) {
@@ -337,7 +380,7 @@ async function gradeSpeaking({
     throw new Error("Transcription is empty; cannot grade speaking response.");
   }
 
-  //EVALUATION PROMPT (STRICT IELTS, PER-QUESTION)
+  // EVALUATION PROMPT (STRICT IELTS, PER-QUESTION)
   const prompt = `
 You are an official IELTS Speaking examiner.
 
@@ -395,11 +438,35 @@ STRICT CHECKING INSTRUCTIONS:
    - Explicitly mention any questions that were not properly answered
      or where the response was much shorter than required.
 
+Return ONLY valid json (no markdown, no explanation, no extra text).
+The response MUST be a single json object with EXACTLY this structure:
+
+{
+  "band_score": number,
+  "overall_band_score": number,
+  "examiner_summary": string,
+  "per_question": [
+    {
+      "question_index": number,
+      "question_text": string,
+      "coverage": "full" | "partial" | "minimal" | "none",
+      "band_score": number,
+      "notes": string
+    }
+  ],
+  "criteria_breakdown": {
+    "fluency": number,
+    "coherence": number,
+    "vocabulary": number,
+    "grammar": number,
+    "pronunciation": number
+  }
+}
+
 Rules:
 - "overall_band_score" must be between 1 and 9 (may be .0 or .5).
-- "band_score" should normally be the same as "overall_band_score" and is kept
-  for backward compatibility.
-- Each per_question.band_score and criteria_breakdown values must also be in the range 1–9 where possible.
+- "band_score" should normally be the same as "overall_band_score" (kept for backward compatibility).
+- Each per_question.band_score and criteria_breakdown value must also be in the range 1–9 where possible.
 `.trim();
 
   const result = await ai.chat.completions.create({
@@ -413,14 +480,12 @@ Rules:
   // Safety: normalize shape & ensure top-level band_score exists
   let overallBand = parsed.overall_band_score;
   if (typeof overallBand !== "number") {
-    // fallback: if per_question available, average them; else 0
     if (Array.isArray(parsed.per_question) && parsed.per_question.length > 0) {
       const bands = parsed.per_question
         .map((q) => (typeof q.band_score === "number" ? q.band_score : null))
         .filter((v) => v != null);
       if (bands.length > 0) {
-        const avg =
-          bands.reduce((a, b) => a + b, 0) / bands.length;
+        const avg = bands.reduce((a, b) => a + b, 0) / bands.length;
         overallBand = Math.round(avg * 2) / 2;
       } else {
         overallBand = 0;
@@ -441,6 +506,7 @@ Rules:
     transcription,
   };
 }
+
 
 
 
@@ -581,20 +647,27 @@ submissionQueue.process(async (job) => {
         tasks: perTaskResults,
       };
     } else if (skill === "speaking") {
-      //OpenAI eval
-      const questions = (testSet.questions || [])
-        .filter((q) => q.skill === "speaking" || q.questionType === "speaking")
-        .map((q) => q.prompt || q.text || "");
+    const speakingQuestions = (testSet.questions || []).filter(
+      (q) => q.skill === "speaking" || q.questionType === "speaking" );
+    const questions = speakingQuestions.map(
+      (q) => q.prompt || q.text || "" );
 
-      evaluationResult = await gradeSpeaking({
-        questions,
-        mediaPath,
-        audioUrl: response?.audioUrl || null,
-        videoUrl: response?.videoUrl || null,
-        manualTranscription: response?.transcription || null,
-      });
+    // Raw OpenAI evaluation
+    evaluationResult = await gradeSpeaking({
+      questions,
+      mediaPath,
+      audioUrl: response?.audioUrl || null,
+      videoUrl: response?.videoUrl || null,
+      manualTranscription: response?.transcription || null,
+    });
 
-      finalBandScore = evaluationResult.band_score;
+    // Apply strict penalties for underlength / missing answers
+    evaluationResult = applyStrictSpeakingPenalties(
+      evaluationResult,
+      speakingQuestions.length
+    );
+
+    finalBandScore = evaluationResult.band_score;
     } else {
       console.warn(
         `[Worker] Unsupported skill "${skill}" for submission ${submissionId}`

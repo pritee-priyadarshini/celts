@@ -8,7 +8,7 @@ const TestSet = require('../models/TestSet');
 const Submission = require('../models/Submission');
 
 const { protect, restrictTo } = require('../middleware/authMiddleware');
-const { submissionQueue } = require('../services/queue'); 
+const { submissionQueue } = require('../services/queue');
 
 const adminAssignRoutes = require('./adminAssignments');
 const adminBulkRoutes = require('./adminBulk');
@@ -207,37 +207,37 @@ router.delete('/admin/users/:id', protect, restrictTo(['admin']), async (req, re
 
 // ADMIN: Reset user password
 router.patch('/admin/users/:id/password', protect, restrictTo(['admin']), async (req, res) => {
-    try {
-      const { id } = req.params;
-      const { newPassword } = req.body;
+  try {
+    const { id } = req.params;
+    const { newPassword } = req.body;
 
-      if (!mongoose.Types.ObjectId.isValid(id)) {
-        return res.status(400).json({ message: 'Invalid user id' });
-      }
-
-      if (!newPassword || newPassword.length < 4) {
-        return res
-          .status(400)
-          .json({ message: 'Password must be at least 4 characters.' });
-      }
-
-      const user = await User.findById(id);
-      if (!user) {
-        return res.status(404).json({ message: 'User not found' });
-      }
-
-      user.password = newPassword;
-
-      await user.save();
-
-      return res.json({ message: 'Password updated successfully.' });
-    } catch (err) {
-      console.error('[Admin change password] error:', err);
-      return res
-        .status(500)
-        .json({ message: 'Server error updating password' });
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: 'Invalid user id' });
     }
+
+    if (!newPassword || newPassword.length < 4) {
+      return res
+        .status(400)
+        .json({ message: 'Password must be at least 4 characters.' });
+    }
+
+    const user = await User.findById(id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    user.password = newPassword;
+
+    await user.save();
+
+    return res.json({ message: 'Password updated successfully.' });
+  } catch (err) {
+    console.error('[Admin change password] error:', err);
+    return res
+      .status(500)
+      .json({ message: 'Server error updating password' });
   }
+}
 );
 
 
@@ -305,7 +305,7 @@ router.get('/student/submission/:id/status', protect, restrictTo(['student']), a
 
 
 // Admin or faculty with permission might want to re-run scoring 
-router.post('/admin/submission/:id/reprocess', protect, restrictTo(['admin','faculty']), async (req, res) => {
+router.post('/admin/submission/:id/reprocess', protect, restrictTo(['admin', 'faculty']), async (req, res) => {
   const id = req.params.id;
   try {
     if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid submission id' });
@@ -328,6 +328,97 @@ router.post('/admin/submission/:id/reprocess', protect, restrictTo(['admin','fac
   }
 });
 
+
+// GET /api/admin/tests
+router.get("/admin/tests", protect, restrictTo(["admin"]), async (req, res) => {
+  try {
+    const tests = await TestSet.find({})
+      .populate("createdBy", "name systemId")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return res.json({
+      tests: tests.map((t) => ({
+        _id: t._id,
+        title: t.title,
+        description: t.description || "",
+        type: t.type,
+        timeLimitMinutes: t.timeLimitMinutes || null,
+        startTime: t.startTime || null,
+        endTime: t.endTime || null,
+        readingSections: t.readingSections || [],
+        listeningSections: t.listeningSections || [],
+        questions: t.questions || [],
+        createdAt: t.createdAt,
+        updatedAt: t.updatedAt,
+        assignedBatches: t.assignedBatches || [],
+        assignedStudents: t.assignedStudents || [],
+        createdBy: t.createdBy
+          ? {
+            _id: t.createdBy._id,
+            name: t.createdBy.name,
+            systemId: t.createdBy.systemId,
+          }
+          : null,
+      })),
+    });
+  } catch (err) {
+    console.error("[GET /admin/tests] error:", err);
+    return res
+      .status(500)
+      .json({ message: "Server error fetching test sets" });
+  }
+}
+);
+
+// GET /api/admin/tests/:id
+router.get("/admin/tests/:id", protect, restrictTo(["admin"]), async (req, res) => {
+  const { id } = req.params;
+
+  if (!id || !id.match(/^[0-9a-fA-F]{24}$/)) {
+    return res.status(400).json({ message: "Invalid test id" });
+  }
+
+  try {
+    const test = await TestSet.findById(id)
+      .populate("createdBy", "name systemId")
+      .lean();
+
+    if (!test) {
+      return res.status(404).json({ message: "Test not found" });
+    }
+
+    return res.json({
+      _id: test._id,
+      title: test.title,
+      description: test.description || "",
+      type: test.type,
+      timeLimitMinutes: test.timeLimitMinutes || null,
+      startTime: test.startTime || null,
+      endTime: test.endTime || null,
+      readingSections: test.readingSections || [],
+      listeningSections: test.listeningSections || [],
+      questions: test.questions || [],
+      createdAt: test.createdAt,
+      updatedAt: test.updatedAt,
+      assignedBatches: test.assignedBatches || [],
+      assignedStudents: test.assignedStudents || [],
+      createdBy: test.createdBy
+        ? {
+          _id: test.createdBy._id,
+          name: test.createdBy.name,
+          systemId: test.createdBy.systemId,
+        }
+        : null,
+    });
+  } catch (err) {
+    console.error("[GET /admin/tests/:id] error:", err);
+    return res
+      .status(500)
+      .json({ message: "Server error fetching test set" });
+  }
+}
+);
 
 
 module.exports = router;

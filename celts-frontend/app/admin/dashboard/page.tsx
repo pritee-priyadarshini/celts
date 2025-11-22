@@ -22,8 +22,6 @@ export default function AdminDashboard() {
     }
   }, [])
 
-  const [currentTab, setCurrentTab] = useState<"overview" | "users">("overview")
-
   return (
     <DashboardLayout navItems={navItems} sidebarHeader="CELTS Admin" userName= {userName} >
       <AdminDashboardPage />

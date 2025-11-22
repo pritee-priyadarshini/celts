@@ -43,13 +43,8 @@ export async function apiDelete(path: string) {
   return request(path, { method: 'DELETE' }); 
 }
 
-export const apiPatch = async (path: string, body: any) => {
-  const response = await fetch(path, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  return response.json()
+export async function apiPatch(path: string, body: any) {
+  return request(path, { method: "PATCH", body: JSON.stringify(body) });
 }
 
 
