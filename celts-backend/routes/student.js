@@ -9,7 +9,7 @@ const TestSet = require('../models/TestSet');
 const TestAttempt = require('../models/TestAttempt');
 const Batch = require('../models/Batch');
 const StudentStats = require('../models/StudentStats');
-const { submissionQueue } = require('../services/queue');
+const { submissionQueue, addSubmissionJob } = require('../services/queue');
 const uploadStudentMedia = require('../services/uploadStudentMedia');
 const { paginate } = require("../utils/pagination");
 
@@ -281,7 +281,10 @@ router.post(
         geminiEvaluation: null,
       });
 
-      await submissionQueue.add({
+      console.log(`[Submission] Speaking submission created - ID: ${submission._id}, Student: ${req.user.email}`);
+      console.log(`[Submission] Media files received: ${Object.keys(mediaPaths).length}, Questions: ${testSet.questions.filter(q => q.questionType === "speaking").length}`);
+
+      await addSubmissionJob({
         submissionId: submission._id.toString(),
         studentId: req.user._id.toString(),
         testId: testSet._id.toString(),
@@ -451,6 +454,102 @@ router.get('/tests/:id/attempts', protect, restrictTo(['student']), async (req, 
   } catch (err) {
     console.error('[GET /student/tests/:id/attempts] error:', err);
     return res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// POST /api/student/tests/:id/start - Start a test attempt
+router.post('/tests/:id/start', protect, restrictTo(['student']), async (req, res) => {
+  const { id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ message: 'Invalid test id' });
+  }
+
+  try {
+    const studentId = req.user._id;
+
+    // Check if test exists
+    const testSet = await TestSet.findById(id);
+    if (!testSet) {
+      return res.status(404).json({ message: 'Test not found' });
+    }
+
+    // Check if student can start this test
+    const allowed = await canStudentStart(testSet, req.user);
+    if (!allowed) {
+      return res.status(403).json({ 
+        message: 'Test is not available at this time',
+        code: 'TEST_NOT_AVAILABLE'
+      });
+    }
+
+    // Check for existing active attempt
+    const existingAttempt = await TestAttempt.findOne({
+      student: studentId,
+      testSet: id,
+      status: 'started'
+    });
+
+    if (existingAttempt) {
+      return res.status(409).json({
+        message: 'Test already in progress',
+        code: 'TEST_IN_PROGRESS',
+        existingAttempt: {
+          attemptId: existingAttempt._id,
+          startedAt: existingAttempt.startedAt
+        }
+      });
+    }
+
+    // Check if student has already completed this test (and retry is not allowed)
+    const completedAttempt = await TestAttempt.findOne({
+      student: studentId,
+      testSet: id,
+      status: { $in: ['completed', 'abandoned', 'violation_exit'] }
+    }).sort({ attemptNumber: -1 });
+
+    if (completedAttempt && !completedAttempt.isRetryAllowed) {
+      return res.status(403).json({
+        message: 'You have already attempted this test',
+        code: 'TEST_ALREADY_COMPLETED',
+        data: {
+          lastAttempt: {
+            status: completedAttempt.status,
+            completedAt: completedAttempt.completedAt,
+            canRetry: false
+          }
+        }
+      });
+    }
+
+    // Determine attempt number
+    const allAttempts = await TestAttempt.find({
+      student: studentId,
+      testSet: id
+    }).sort({ attemptNumber: -1 });
+
+    const attemptNumber = allAttempts.length > 0 ? allAttempts[0].attemptNumber + 1 : 1;
+
+    // Create new test attempt
+    const testAttempt = new TestAttempt({
+      student: studentId,
+      testSet: id,
+      attemptNumber,
+      status: 'started',
+      startedAt: new Date()
+    });
+
+    await testAttempt.save();
+
+    return res.status(201).json({
+      message: 'Test attempt started successfully',
+      attemptId: testAttempt._id,
+      attemptNumber: testAttempt.attemptNumber,
+      startedAt: testAttempt.startedAt
+    });
+
+  } catch (err) {
+    console.error('[POST /student/tests/:id/start] error:', err);
+    return res.status(500).json({ message: 'Server error starting test' });
   }
 });
 
@@ -715,18 +814,26 @@ router.post('/submit/:testId/:skill', protect, restrictTo(['student']), [body('r
 
       const submission = await Submission.create(submissionPayload);
 
-      // Queue job only for non-auto-gradable skills (writing/speaking)
+      console.log(`[Submission] ${skill.toUpperCase()} submission created - ID: ${submission._id}, Student: ${req.user.email}`);
+      console.log(`[Submission] Status: ${submission.status}, Auto-gradable: ${autoGradable}`);
+      if (autoGradable) {
+        console.log(`[Submission] Auto-graded - Band: ${submission.bandScore}, Marks: ${submission.totalMarks}/${submission.maxMarks}`);
+      }
+
       let jobId = null;
       if (!autoGradable) {
+        console.log(`[Submission] Queuing ${skill} test for async grading...`);
         const jobData = {
           submissionId: submission._id.toString(),
           studentId: req.user._id.toString(),
           testId: testSet._id.toString(),
           skill,
           response,
+          mediaPaths: {}, 
         };
-        const job = await submissionQueue.add(jobData);
+        const job = await addSubmissionJob(jobData);
         jobId = job.id || null;
+        console.log(`[Submission] ✓ Job ${jobId} created for submission ${submission._id}`);
       }
 
     // Update StudentStats (only when we have a bandScore)
@@ -995,28 +1102,29 @@ router.post('/tests/:id/cleanup', protect, restrictTo(['student']), async (req, 
     const { id } = req.params;
     const userId = req.user._id;
 
-    // Find any stale attempts (started more than 6 hours ago)
-    const sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);
+  
+    const fifteenMinutesAgo = new Date(Date.now() - 15 * 60 * 1000);
 
-    const staleAttempts = await TestAttempt.find({
+    const startedAttempts = await TestAttempt.find({
       student: userId,
       testSet: id,
-      status: 'started',
-      startTime: { $lt: sixHoursAgo }
+      status: 'started'
     });
 
-    if (staleAttempts.length > 0) {
-      // Mark as abandoned
+    if (startedAttempts.length > 0) {
+      // Mark all as abandoned
       await TestAttempt.updateMany(
         {
           student: userId,
           testSet: id,
-          status: 'started',
-          startTime: { $lt: sixHoursAgo }
+          status: 'started'
         },
         {
-          status: 'abandoned',
-          endTime: new Date()
+          $set: {
+            status: 'abandoned',
+            completedAt: new Date(),
+            exitReason: 'manual_exit'
+          }
         }
       );
 
@@ -1029,20 +1137,22 @@ router.post('/tests/:id/cleanup', protect, restrictTo(['student']), async (req, 
           status: 'active'
         },
         {
-          status: 'terminated',
-          terminationReason: 'cleanup'
+          $set: {
+            status: 'terminated',
+            terminationReason: 'cleanup'
+          }
         }
       );
 
       res.json({
         success: true,
-        message: `Cleaned up ${staleAttempts.length} stale attempt(s)`,
-        cleanedAttempts: staleAttempts.length
+        message: `Cleaned up ${startedAttempts.length} attempt(s)`,
+        cleanedAttempts: startedAttempts.length
       });
     } else {
       res.json({
         success: true,
-        message: 'No stale attempts found',
+        message: 'No attempts to clean up',
         cleanedAttempts: 0
       });
     }
@@ -1050,7 +1160,7 @@ router.post('/tests/:id/cleanup', protect, restrictTo(['student']), async (req, 
     console.error('Cleanup error:', error);
     res.status(500).json({
       success: false,
-      message: 'Failed to cleanup stale attempts',
+      message: 'Failed to cleanup attempts',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }

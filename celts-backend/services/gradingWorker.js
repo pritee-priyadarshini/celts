@@ -424,15 +424,28 @@ function buildDetailedSpeakingSummary(evaluation, totalQuestions) {
 async function gradeSubmission(jobData) {
   const { submissionId, testId, skill, response, mediaPaths } = jobData;
 
+  console.log(`\n========================================`);
+  console.log(`[Worker] Starting grading process`);
+  console.log(`[Worker] Submission ID: ${submissionId}`);
+  console.log(`[Worker] Test ID: ${testId}`);
+  console.log(`[Worker] Skill: ${skill}`);
+  console.log(`[Worker] Response keys: ${response ? Object.keys(response).join(', ') : 'none'}`);
+  console.log(`[Worker] MediaPaths keys: ${mediaPaths ? Object.keys(mediaPaths).join(', ') : 'none'}`);
+  console.log(`========================================\n`);
+
   const submission = await Submission.findById(submissionId).populate("student");
   if (!submission) {
+    console.error(`[Worker] ERROR: Submission ${submissionId} not found in database`);
     throw new Error(`Submission ${submissionId} not found`);
   }
+  console.log(`[Worker] ✓ Submission found - Status: ${submission.status}, Student: ${submission.student?.name}`);
   
   const testSet = await TestSet.findById(testId);
   if (!testSet) {
+    console.error(`[Worker] ERROR: TestSet ${testId} not found in database`);
     throw new Error(`TestSet ${testId} not found`);
   }
+  console.log(`[Worker] ✓ TestSet found - Title: ${testSet.title}, Total questions: ${testSet.questions?.length}`);
 
   let finalBand = null;
   let totalMarks = 0;
@@ -440,10 +453,32 @@ async function gradeSubmission(jobData) {
 
   if (skill === "writing") {
     const questions = testSet.questions.filter(q => q.questionType === "writing");
+    console.log(`[Worker] Found ${questions.length} writing questions to grade`);
+    
+    if (questions.length === 0) {
+      throw new Error(`No writing questions found in test ${testId}`);
+    }
+    
     const tasks = [];
 
-    for (const q of questions) {
-      const ans = response?.[String(q._id)]?.text || "";
+    for (let i = 0; i < questions.length; i++) {
+      const q = questions[i];
+      
+      // Find question index in original testSet.questions array
+      const questionIndex = testSet.questions.findIndex(tq => 
+        (tq._id && q._id && String(tq._id) === String(q._id)) || tq === q
+      );
+      
+      // Try to get answer by ID first, then by index (matches frontend qKey logic)
+      const keyById = q._id ? String(q._id) : null;
+      const keyByIndex = questionIndex >= 0 ? String(questionIndex) : null;
+      
+      const answerObj = (keyById && response?.[keyById]) || 
+                        (keyByIndex && response?.[keyByIndex]) || 
+                        null;
+      
+      const ans = answerObj?.text || "";
+      console.log(`[Worker] Grading writing question ${q._id || questionIndex}, answer length: ${ans.length}`);
 
       const images = [];
       if (Array.isArray(q.imageUrls)) images.push(...q.imageUrls);
@@ -472,6 +507,8 @@ async function gradeSubmission(jobData) {
     //const summary = buildDetailedWritingSummary(tasks, finalBand);
     const summary = tasks.map((t, i) => `Task ${i + 1}:\n${t.evaluation.examiner_summary}`).join("\n\n");
 
+    console.log(`[Worker] Writing evaluation complete. Band: ${finalBand}, Total: ${totalMarks}/${maxMarks}`);
+
     await Submission.findByIdAndUpdate(submissionId, {
       status: "graded",
       bandScore: finalBand,
@@ -491,10 +528,26 @@ async function gradeSubmission(jobData) {
 
   if (skill === "speaking") {
     const questions = testSet.questions.filter(q => q.questionType === "speaking");
+    
+    // Build media paths array with fallback logic (matches frontend qKey logic)
+    const mediaPathsArray = questions.map(q => {
+      // Find question index in original testSet.questions array
+      const questionIndex = testSet.questions.findIndex(tq => 
+        (tq._id && q._id && String(tq._id) === String(q._id)) || tq === q
+      );
+      
+      const keyById = q._id ? String(q._id) : null;
+      const keyByIndex = questionIndex >= 0 ? String(questionIndex) : null;
+      
+      // Try to get media path by ID first, then by index
+      return (keyById && mediaPaths?.[keyById]) || 
+             (keyByIndex && mediaPaths?.[keyByIndex]) || 
+             null;
+    });
 
     let evaluation = await gradeSpeaking({
       questions,
-      mediaPath: questions.map(q => mediaPaths?.[String(q._id)] || null),
+      mediaPath: mediaPathsArray,
     });
     evaluation = applyStrictSpeakingPenalties(evaluation, questions.length);
 
@@ -516,7 +569,13 @@ async function gradeSubmission(jobData) {
     });
   }
 
-  console.log(`[Worker] Graded ${skill.toUpperCase()} test for submission ${submissionId} with Band: ${finalBand}`);
+  console.log(`\n========================================`);
+  console.log(`[Worker] ✓✓✓ GRADING COMPLETED SUCCESSFULLY ✓✓✓`);
+  console.log(`[Worker] Submission ID: ${submissionId}`);
+  console.log(`[Worker] Skill: ${skill.toUpperCase()}`);
+  console.log(`[Worker] Final Band Score: ${finalBand}`);
+  console.log(`[Worker] Status updated to: graded`);
+  console.log(`========================================\n`);
   return { submissionId, skill, finalBand };
 }
 
@@ -536,6 +595,19 @@ submissionQueue.process(CONCURRENCY_LIMIT, async (job) => {
     return result;
   } catch (error) {
     console.error(`[Worker] Job ${job.id} failed:`, error.message);
+    console.error(`[Worker] Full error:`, error);
+    
+    // Update submission to failed status
+    try {
+      await Submission.findByIdAndUpdate(job.data.submissionId, {
+        status: 'failed',
+        geminiError: error.message || 'Grading failed',
+      });
+      console.error(`[Worker] Marked submission ${job.data.submissionId} as failed`);
+    } catch (updateError) {
+      console.error(`[Worker] Failed to update submission status:`, updateError.message);
+    }
+    
     throw error; 
   }
 });

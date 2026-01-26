@@ -193,15 +193,7 @@ export function useScreenMonitoring(options: UseScreenMonitoringOptions = {}) {
         lastScreenHeight = currentHeight;
       }
 
-      try {
-        if ((screen as any).availLeft !== 0 || (screen as any).availTop !== 0) {
-          showViolationWarning(
-            'multiple_monitors',
-            'Multiple monitor setup detected'
-          );
-        }
-      } catch (error) {
-      }
+      // Multiple monitor detection removed - no longer flagged as violation
     };
 
     checkScreenChanges();

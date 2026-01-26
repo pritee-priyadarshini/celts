@@ -201,12 +201,16 @@ async function addSubmissionJob(jobData, priority = 'normal') {
         status: 'queued',
         queuedAt: new Date(),
       });
+      console.log(`[Queue] ✓ Submission ${jobData.submissionId} status updated to 'queued'`);
     } catch (err) {
       console.error('[Queue] Failed to update submission status:', err.message);
     }
   }
   
-  return submissionQueue.add(jobData, options);
+  console.log(`[Queue] Adding job to queue - Submission: ${jobData.submissionId}, Skill: ${jobData.skill}`);
+  const job = await submissionQueue.add(jobData, options);
+  console.log(`[Queue] ✓ Job ${job.id} added to queue successfully`);
+  return job;
 }
 
 async function closeQueue() {

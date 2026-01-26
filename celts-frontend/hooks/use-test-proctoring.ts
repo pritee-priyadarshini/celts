@@ -200,7 +200,7 @@ export function useTestProctoring(options: UseTestProctoringOptions = {}) {
       return;
     }
 
-    const criticalViolationTypes = ['tab_switch', 'fullscreen_exit', 'multiple_monitors'];
+    const criticalViolationTypes = ['tab_switch', 'fullscreen_exit'];
     
     if (criticalViolationTypes.includes(type)) {
       setCriticalViolationType(type);

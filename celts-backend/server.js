@@ -45,6 +45,18 @@ app.use(cors({
 
 console.log(`Starting CELTS Backend on port ${PORT}...`);
 
+// Log ALL incoming requests for debugging
+app.use((req, res, next) => {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] ${req.method} ${req.path}`);
+  if (req.path.includes('/submit')) {
+    console.log(`[REQUEST] Headers:`, req.headers);
+    console.log(`[REQUEST] Body type:`, typeof req.body);
+    console.log(`[REQUEST] Is FormData:`, req.headers['content-type']);
+  }
+  next();
+});
+
 app.use('/api', apiRoutes);
 
 const frontendPath = path.join(__dirname, 'public');

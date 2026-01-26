@@ -198,6 +198,7 @@ function TestRunnerContent() {
   const [hasStarted, setHasStarted] = useState(false);
   const [startAttempting, setStartAttempting] = useState(false);
   const [attemptId, setAttemptId] = useState<string | null>(null);
+  const cleanupAttemptedRef = useRef(false);
 
   const [answers, setAnswers] = useState<Record<string, any>>({});
   const [submitting, setSubmitting] = useState(false);
@@ -216,6 +217,18 @@ function TestRunnerContent() {
   const [timeRemaining, setTimeRemaining] = useState<number | null>(null);
   const [timerWarning, setTimerWarning] = useState(false);
   const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // API connectivity check on mount
+  useEffect(() => {
+    console.log("=================================================");
+    console.log("CELTS Test Runner - System Check");
+    console.log("=================================================");
+    console.log("Environment:", process.env.NODE_ENV);
+    console.log("API URL:", process.env.NEXT_PUBLIC_API_URL);
+    console.log("Current URL:", window.location.href);
+    console.log("Auth Token exists:", !!localStorage.getItem("celts_token"));
+    console.log("=================================================");
+  }, []);
 
   useEffect(() => {
     if (typeof window !== "undefined" && testId && !deviceSessionCreated) {
@@ -711,18 +724,75 @@ const handleStartTest = async () => {
     });
   }
 
-  // --- REMOVED start API call entirely ---
+    try {
+      const startRes = await api.apiPost(`/student/tests/${testId}/start`, {});
+      if (!startRes.ok) {
+        const errorMessage = startRes.error?.message || "Failed to start test attempt";
 
-  try {
-    // still firing exam security session if token is available
-    if (sessionToken) {
-      try {
-        const examStartRes = await api.apiPost("/security/exam/start", {
-          testId: testId,
-          sessionToken: sessionToken,
-          deviceFingerprint: `${navigator.platform}-${navigator.userAgent}`,
-          clientStartTime: new Date().toISOString(),
+        if (errorMessage.includes("already in progress")) {
+          if (startRes.data?.existingAttempt) {
+            const existingAttemptId = startRes.data.existingAttempt.attemptId;
+            setAttemptId(existingAttemptId);
+            setHasStarted(true);
+            toast.success("Resumed Test", {
+              description: "Continuing your existing test session.",
+              duration: 3000,
+            });
+            setStartAttempting(false);
+            return;
+          }
+
+          toast.info("Cleaning up session...", {
+            description: "Attempting to resolve session conflict.",
+            duration: 2000,
+          });
+
+          try {
+            await api.apiPost(`/student/tests/${testId}/cleanup`, {});
+            setTimeout(() => {
+              handleStartTest();
+            }, 1000);
+          } catch (cleanupError) {
+            toast.error("Session Conflict", {
+              description: "Unable to start test. Please refresh the page.",
+              duration: 5000,
+            });
+            setTimeout(() => {
+              window.location.reload();
+            }, 2000);
+          }
+          setStartAttempting(false);
+          return;
+        } else if (errorMessage.includes("already attempted")) {
+          toast.error("Test Completed", {
+            description: "You have already completed this test. Contact admin if you need to retake it.",
+            duration: 5000,
+          });
+          setTimeout(() => {
+            router.push("/student/dashboard");
+          }, 2000);
+          setStartAttempting(false);
+          return;
+        }
+
+        toast.error("Cannot start test", {
+          description: errorMessage,
         });
+        setStartAttempting(false);
+        return;
+      }
+
+      setAttemptId(startRes.data.attemptId);
+      console.log("Test attempt started:", startRes.data);
+
+      if (sessionToken) {
+        try {
+          const examStartRes = await api.apiPost("/security/exam/start", {
+            testId: testId,
+            sessionToken: sessionToken,
+            deviceFingerprint: `${navigator.platform}-${navigator.userAgent}`,
+            clientStartTime: new Date().toISOString(),
+          });
 
         if (examStartRes.ok) {
           console.log("Exam security session started successfully");
@@ -1621,6 +1691,183 @@ const handleStartTest = async () => {
           .map((q, idx) => ({ q, idx }))
           .filter((x) => x.q.questionType === "speaking");
 
+        setSubmitMessage("Uploading recordings and submitting test...");
+
+        try {
+          console.log(`[Submission] ============================================`);
+          console.log(`[Submission] Starting SPEAKING test submission`);
+          console.log(`[Submission] Test ID: ${test._id}`);
+          console.log(`[Submission] Speaking questions count: ${speakingQuestions.length}`);
+          console.log(`[Submission] Recorded blobs count: ${Object.keys(speakingBlobsRef.current).length}`);
+          console.log(`[Submission] API URL: ${process.env.NEXT_PUBLIC_API_URL}`);
+          console.log(`[Submission] ============================================`);
+
+          const form = new FormData();
+
+          // ✅ APPEND EACH QUESTION'S AUDIO SEPARATELY
+          for (const { q, idx } of speakingQuestions) {
+            const key = qKey(q, idx);
+            const blob = speakingBlobsRef.current[key];
+
+            if (blob) {
+              form.append(`media_${key}`, blob, `speaking_${key}.webm`);
+              console.log(`[Submission] Added audio for question ${key}, size: ${blob.size} bytes`);
+            } else {
+              console.warn(`[Submission] ⚠️ No audio blob found for question ${key}`);
+            }
+          }
+
+          // metadata
+          form.append("response", JSON.stringify(answers));
+          form.append("evaluationPayload", JSON.stringify(evaluationPayload));
+
+          const API = process.env.NEXT_PUBLIC_API_URL;
+          const token = localStorage.getItem("celts_token");
+
+          if (!API) {
+            throw new Error('API URL is not configured. Please check environment variables.');
+          }
+
+          if (!token) {
+            throw new Error('Authentication token not found. Please log in again.');
+          }
+
+          const submitUrl = `${API}/student/submit/${test._id}/${skill}`;
+          console.log(`[Submission] Submitting to: ${submitUrl}`);
+
+          const submitResponse = await fetch(submitUrl, {
+            method: "POST",
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+            body: form,
+          });
+
+          console.log('[Submission] Response status:', submitResponse.status);
+          console.log('[Submission] Response ok:', submitResponse.ok);
+
+          if (!submitResponse.ok) {
+            const errorText = await submitResponse.text();
+            console.error('[Submission] Error response:', errorText);
+            let errorData: any = {};
+            try {
+              errorData = JSON.parse(errorText);
+            } catch {
+              errorData = { message: errorText || 'Unknown error' };
+            }
+            throw new Error(`Submission failed (${submitResponse.status}): ${errorData.message || submitResponse.statusText}`);
+          }
+
+          const submitData = await submitResponse.json();
+          console.log('[Submission] ✓ Speaking test submitted successfully');
+          console.log('[Submission] Response data:', submitData);
+          console.log('[Submission] Submission ID:', submitData.submissionId);
+
+          // Mark test attempt as completed
+          console.log('[Submission] Marking test attempt as completed...');
+          const endResponse = await fetch(`${API}/student/tests/${test._id}/end`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify({
+              reason: autoSubmit ? "time_expired" : "completed",
+              submissionId: submitData.submissionId,
+              violations: [],
+            }),
+          });
+
+          console.log('[Submission] End response status:', endResponse.status);
+
+          if (!endResponse.ok) {
+            console.warn('[Submission] ⚠️ Failed to mark attempt as completed');
+          } else {
+            console.log("[Submission] ✓ Test attempt marked as completed");
+          }
+
+          setSubmitMessage("Test submitted! Redirecting...");
+
+          if (document.fullscreenElement) {
+            await document.exitFullscreen().catch(() => { });
+          }
+
+          const params = new URLSearchParams({
+            testTitle: test.title,
+            testType: skill,
+            autoSubmit: autoSubmit ? "true" : "false",
+            submissionId: submitData.submissionId || "processing",
+          });
+
+          console.log('[Submission] Redirecting to:', `/student/test/complete?${params.toString()}`);
+          router.push(`/student/test/complete?${params.toString()}`);
+          return;
+
+        } catch (error: any) {
+          console.error('[Submission] ❌❌❌ CRITICAL ERROR (Speaking) ❌❌❌');
+          console.error('[Submission] Error type:', error?.constructor?.name);
+          console.error('[Submission] Error message:', error?.message);
+          console.error('[Submission] Full error:', error);
+          console.error('[Submission] Stack trace:', error?.stack);
+          
+          setSubmitting(false);
+          setIsSubmissionInProgress(false);
+          
+          const errorMessage = error?.message || 'Unknown error occurred';
+          alert(`Failed to submit speaking test: ${errorMessage}\n\nPlease contact support immediately. Do not close this page.`);
+          return;
+        }
+      }
+
+      // -------------------------------------------------------------------
+
+      // Non-speaking skills (reading / listening / writing)
+      setSubmitMessage("Submitting your test...");
+
+      try {
+        console.log(`[Submission] ============================================`);
+        console.log(`[Submission] Starting ${skill} test submission`);
+        console.log(`[Submission] Test ID: ${test._id}`);
+        console.log(`[Submission] Answers count: ${Object.keys(answers).length}`);
+        console.log(`[Submission] Answers keys:`, Object.keys(answers));
+        console.log(`[Submission] API URL: ${process.env.NEXT_PUBLIC_API_URL}`);
+        console.log(`[Submission] Token exists: ${!!localStorage.getItem("celts_token")}`);
+        console.log(`[Submission] ============================================`);
+        
+        const submitResponse = await api.apiPost(`/student/submit/${test._id}/${skill}`, {
+          response: answers,
+          evaluationPayload,
+        });
+
+        console.log('[Submission] Raw response:', submitResponse);
+        console.log('[Submission] Response ok:', submitResponse.ok);
+        console.log('[Submission] Response data:', submitResponse.data);
+        console.log('[Submission] Response status:', submitResponse.status);
+
+        if (!submitResponse.ok) {
+          const errorMsg = submitResponse.error?.message || submitResponse.data?.message || 'Unknown error';
+          console.error('[Submission] ❌ Submission failed with error:', errorMsg);
+          throw new Error(`Submission failed: ${errorMsg}`);
+        }
+
+        const submissionId = submitResponse.data?.submissionId;
+        console.log('[Submission] ✓ Test submitted successfully');
+        console.log('[Submission] Submission ID:', submissionId);
+
+        // Mark test attempt as completed
+        console.log('[Submission] Marking test attempt as completed...');
+        const endResponse = await api.apiPost(`/student/tests/${test._id}/end`, {
+          reason: autoSubmit ? "time_expired" : "completed",
+          submissionId: submissionId,
+          violations: [],
+        });
+
+        console.log('[Submission] End response:', endResponse);
+
+        if (!endResponse.ok) {
+          console.warn('[Submission] ⚠️ Failed to mark attempt as completed:', endResponse.error);
+        } else {
+          console.log('[Submission] ✓ Test attempt marked as completed');
+        }
+
         setSubmitMessage("Test submitted! Redirecting...");
 
         if (document.fullscreenElement) {
@@ -1631,102 +1878,26 @@ const handleStartTest = async () => {
           testTitle: test.title,
           testType: skill,
           autoSubmit: autoSubmit ? "true" : "false",
-          submissionId: "processing",
+          submissionId: submissionId || "processing",
         });
-
+        
+        console.log('[Submission] Redirecting to:', `/student/test/complete?${params.toString()}`);
         router.push(`/student/test/complete?${params.toString()}`);
 
-        backgroundSubmissionTimeoutRef.current = setTimeout(async () => {
-          try {
-            const form = new FormData();
-
-            // ✅ APPEND EACH QUESTION'S AUDIO SEPARATELY
-            for (const { q, idx } of speakingQuestions) {
-              const key = qKey(q, idx);
-              const blob = speakingBlobsRef.current[key];
-
-              if (blob) {
-                form.append(`media_${key}`, blob, `speaking_${key}.webm`);
-              }
-            }
-
-            // metadata
-            form.append("response", JSON.stringify(answers));
-            form.append("evaluationPayload", JSON.stringify(evaluationPayload));
-
-            const API = process.env.NEXT_PUBLIC_API_URL;
-            const token = localStorage.getItem("celts_token");
-
-            await fetch(`${API}/student/submit/${test._id}/${skill}`, {
-              method: "POST",
-              headers: token ? { Authorization: `Bearer ${token}` } : {},
-              body: form,
-            });
-
-            // mark attempt completed
-            await fetch(`${API}/student/tests/${test._id}/end`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                ...(token ? { Authorization: `Bearer ${token}` } : {}),
-              },
-              body: JSON.stringify({
-                reason: autoSubmit ? "time_expired" : "completed",
-                submissionId: null,
-                violations: [],
-              }),
-            });
-
-            console.log("Background submission completed for speaking test");
-          } catch (error) {
-            console.error("Background submission failed:", error);
-          } finally {
-            backgroundSubmissionTimeoutRef.current = null;
-          }
-        }, 100);
-
+      } catch (error: any) {
+        console.error('[Submission] ❌❌❌ CRITICAL ERROR ❌❌❌');
+        console.error('[Submission] Error type:', error?.constructor?.name);
+        console.error('[Submission] Error message:', error?.message);
+        console.error('[Submission] Full error:', error);
+        console.error('[Submission] Stack trace:', error?.stack);
+        
+        setSubmitting(false);
+        setIsSubmissionInProgress(false);
+        
+        const errorMessage = error?.message || error?.error?.message || 'Unknown error occurred';
+        alert(`Failed to submit test: ${errorMessage}\n\nPlease contact support immediately. Do not close this page.`);
         return;
       }
-
-      // -------------------------------------------------------------------
-
-      // Non-speaking skills (reading / listening / writing)
-      setSubmitMessage("Test submitted! Redirecting...");
-
-      if (document.fullscreenElement) {
-        await document.exitFullscreen().catch(() => { });
-      }
-
-      const params = new URLSearchParams({
-        testTitle: test.title,
-        testType: skill,
-        autoSubmit: autoSubmit ? "true" : "false",
-        submissionId: "processing",
-      });
-      router.push(`/student/test/complete?${params.toString()}`);
-
-      backgroundSubmissionTimeoutRef.current = setTimeout(async () => {
-        try {
-          await api.apiPost(`/student/submit/${test._id}/${skill}`, {
-            response: answers,
-            evaluationPayload,
-          });
-
-          // Mark test attempt as completed
-          await api.apiPost(`/student/tests/${test._id}/end`, {
-            reason: autoSubmit ? "time_expired" : "completed",
-            submissionId: null,
-            violations: [],
-          });
-
-          console.log('Background submission completed for', skill, 'test');
-        } catch (error) {
-          console.error('Background submission failed:', error);
-          // Silent failure - user is already on completion page
-        } finally {
-          backgroundSubmissionTimeoutRef.current = null;
-        }
-      }, 100);
     } catch (err: any) {
       console.error('Submission error:', err);
       // Even on error, redirect immediately for better UX
